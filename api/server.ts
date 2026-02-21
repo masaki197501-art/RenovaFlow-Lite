@@ -16,13 +16,16 @@ app.post('/api/login', (req, res) => {
   }
 });
 
-// Gemini連携API（参考用）
+// Gemini連携API（後の機能追加用）
 app.post('/api/chat', async (req, res) => {
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-  // ここにAIの処理を書く
-  res.json({ message: "AI function ready" });
+  try {
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    res.json({ message: "AI function ready" });
+  } catch (error) {
+    res.status(500).json({ error: "AI error" });
+  }
 });
 
-// Vercel用のエクスポート（ここが重要！）
+// Vercel用のエクスポート（ここが一番大事です！）
 export default app;
