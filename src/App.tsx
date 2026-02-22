@@ -21,9 +21,11 @@ import {
   User as UserIcon,
   CheckCircle2,
   Clock,
-  AlertCircle
+  AlertCircle,
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { GoogleGenAI } from "@google/genai";
 import { 
   format, 
   startOfMonth, 
@@ -88,6 +90,86 @@ const Dialog = ({ isOpen, onClose, title, children }: { isOpen: boolean; onClose
     )}
   </AnimatePresence>
 );
+
+const AIDocModal = ({ isOpen, onClose, project, onSave }: { isOpen: boolean; onClose: () => void; project: Project; onSave: (content: string, fileName: string) => Promise<void> }) => {
+  const [prompt, setPrompt] = useState('リフォーム工程の標準フローについて、Wordに貼り付けやすい見出し付きの構成で作成してください。');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generatedContent, setGeneratedContent] = useState('');
+  const [fileName, setFileName] = useState(`${project.propertyName || project.title}_${format(new Date(), 'yyyyMMdd')}.txt`);
+
+  const handleGenerate = async () => {
+    setIsGenerating(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: (import.meta as any).env.VITE_GEMINI_API_KEY || '' });
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config: {
+          systemInstruction: "あなたはリフォーム会社の優秀な事務アシスタントです。ユーザーの依頼に基づき、Word等の文書作成ソフトに貼り付けやすい、見出し（#や##）を用いた構造化されたテキスト資料を作成してください。余計な挨拶は不要です。",
+        }
+      });
+      setGeneratedContent(response.text || '');
+    } catch (error) {
+      console.error('AI Generation Error:', error);
+      alert('AIによる生成に失敗しました。');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!generatedContent) return;
+    await onSave(generatedContent, fileName);
+    onClose();
+  };
+
+  return (
+    <Dialog isOpen={isOpen} onClose={onClose} title="AI資料作成アシスタント">
+      <div className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">依頼内容</label>
+          <textarea 
+            className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="例：リフォーム工程の標準フローについて"
+          />
+        </div>
+        
+        <div className="flex justify-end">
+          <Button onClick={handleGenerate} disabled={isGenerating || !prompt} className="flex items-center gap-2">
+            <Sparkles size={16} />
+            {isGenerating ? '生成中...' : '資料を生成する'}
+          </Button>
+        </div>
+
+        {generatedContent && (
+          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">ファイル名</label>
+              <input 
+                type="text"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                value={fileName}
+                onChange={(e) => setFileName(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">生成された内容</label>
+              <div className="w-full px-3 py-2 border border-gray-200 rounded-lg bg-gray-50 max-h-[200px] overflow-y-auto text-sm whitespace-pre-wrap">
+                {generatedContent}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setGeneratedContent('')}>やり直す</Button>
+              <Button onClick={handleSave}>SharePointに保存</Button>
+            </div>
+          </motion.div>
+        )}
+      </div>
+    </Dialog>
+  );
+};
 
 // --- Pages ---
 
@@ -1090,8 +1172,9 @@ const ProjectDetail = ({ projectId, onBack, onRefresh }: { projectId: string; on
   const [loading, setLoading] = useState(true);
   const [deleteFileId, setDeleteFileId] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
-  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
-  const [sharePointError, setSharePointError] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isAIDocModalOpen, setIsAIDocModalOpen] = useState(false);
+  const [spStatus, setSpStatus] = useState<{ status: string; message: string } | null>(null);
 
   const fetchProject = async () => {
     const res = await fetch(`/api/projects/${projectId}`);
@@ -1102,44 +1185,65 @@ const ProjectDetail = ({ projectId, onBack, onRefresh }: { projectId: string; on
     setLoading(false);
   };
 
+  const checkSpStatus = async () => {
+    try {
+      const res = await fetch('/api/sharepoint/status');
+      if (res.ok) {
+        const data = await res.json();
+        setSpStatus(data);
+      }
+    } catch (e) {
+      console.error('Failed to check SharePoint status:', e);
+    }
+  };
+
   useEffect(() => {
     fetchProject();
+    checkSpStatus();
   }, [projectId]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setIsUploading(true);
     const formData = new FormData();
     formData.append('file', file);
 
-    const res = await fetch(`/api/projects/${projectId}/files`, {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (res.ok) {
-      fetchProject();
+    try {
+      const res = await fetch(`/api/projects/${projectId}/files`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (res.ok) {
+        fetchProject();
+      } else {
+        alert('ファイルのアップロードに失敗しました。SharePointの設定を確認してください。');
+      }
+    } catch (error) {
+      console.error('Upload error:', error);
+      alert('アップロード中にエラーが発生しました。');
+    } finally {
+      setIsUploading(false);
     }
   };
 
-  const handleCreateSharePointFolder = async () => {
-    if (!project) return;
-    setIsCreatingFolder(true);
-    setSharePointError(null);
+  const handleAISave = async (content: string, fileName: string) => {
     try {
-      const response = await fetch(`/api/projects/${projectId}/sharepoint-folder`, {
+      const res = await fetch(`/api/projects/${projectId}/ai-doc`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, fileName }),
       });
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'フォルダ作成に失敗しました');
+      if (res.ok) {
+        fetchProject();
+        alert('SharePointに保存されました。');
+      } else {
+        alert('SharePointへの保存に失敗しました。');
       }
-      alert('SharePointフォルダを作成または確認しました。');
     } catch (error) {
-      setSharePointError(error instanceof Error ? error.message : '不明なエラーが発生しました');
-    } finally {
-      setIsCreatingFolder(false);
+      console.error('AI Save error:', error);
+      alert('保存中にエラーが発生しました。');
     }
   };
 
@@ -1402,21 +1506,6 @@ const ProjectDetail = ({ projectId, onBack, onRefresh }: { projectId: string; on
                     )}
                   </div>
                 </div>
-                <div className="pt-2">
-                  <Button 
-                    variant="secondary" 
-                    size="sm" 
-                    onClick={handleCreateSharePointFolder}
-                    disabled={isCreatingFolder}
-                    className="w-full flex items-center justify-center gap-2 text-xs"
-                  >
-                    <Share2 size={14} />
-                    {isCreatingFolder ? '作成中...' : 'SharePointフォルダを作成'}
-                  </Button>
-                  {sharePointError && (
-                    <p className="text-[10px] text-red-500 mt-1 font-medium">{sharePointError}</p>
-                  )}
-                </div>
               </div>
               <div className="space-y-4">
                 <div>
@@ -1436,17 +1525,38 @@ const ProjectDetail = ({ projectId, onBack, onRefresh }: { projectId: string; on
         {/* 関連ファイル (Overviewの下に設置) */}
         <section className="space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-              <FileText size={20} className="text-indigo-600" />
-              関連ファイル
-            </h3>
-            <label className="cursor-pointer">
-              <input type="file" className="hidden" onChange={handleFileUpload} />
-              <div className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium">
-                <Upload size={16} />
-                アップロード
-              </div>
-            </label>
+            <div className="flex flex-col">
+              <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                <FileText size={20} className="text-indigo-600" />
+                関連ファイル
+              </h3>
+              {spStatus && (
+                <div className={cn(
+                  "text-[10px] mt-1 flex items-center gap-1",
+                  spStatus.status === 'ok' ? "text-emerald-600" : "text-red-500"
+                )}>
+                  <div className={cn("w-1.5 h-1.5 rounded-full", spStatus.status === 'ok' ? "bg-emerald-500" : "bg-red-500")} />
+                  SharePoint: {spStatus.message}
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button 
+                variant="secondary" 
+                className="flex items-center gap-2 text-sm"
+                onClick={() => setIsAIDocModalOpen(true)}
+              >
+                <Sparkles size={16} />
+                AIで資料作成
+              </Button>
+              <label className="cursor-pointer">
+                <input type="file" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
+                <div className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium">
+                  <Upload size={16} />
+                  {isUploading ? 'アップロード中...' : 'アップロード'}
+                </div>
+              </label>
+            </div>
           </div>
           <Card className="p-6">
             <div className="space-y-2">
@@ -1807,6 +1917,13 @@ const ProjectDetail = ({ projectId, onBack, onRefresh }: { projectId: string; on
           </div>
         </div>
       </Dialog>
+
+      <AIDocModal 
+        isOpen={isAIDocModalOpen} 
+        onClose={() => setIsAIDocModalOpen(false)} 
+        project={project}
+        onSave={handleAISave}
+      />
     </div>
   );
 };
